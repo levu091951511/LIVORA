@@ -1,0 +1,6 @@
+{
+  "name": "Nhịp — Lịch & Công Việc Thông Minh",
+  "description": "Ứng dụng quản lý công việc với lịch tuần/tháng trực quan, nhập liệu thông minh và theo dõi tiến độ hàng ngày.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
