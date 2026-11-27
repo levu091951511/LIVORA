@@ -25,6 +25,7 @@ import { QuickCaptureSheet } from './components/QuickCaptureSheet';
 import { SecurityBackupSheet } from './components/SecurityBackupSheet';
 import { TaskRow } from './components/TaskRow';
 import { TransactionSheet } from './components/TransactionSheet';
+import { WalletBalanceSetupSheet } from './components/WalletBalanceSetupSheet';
 import {
   createDefaultSecurity,
   DEFAULT_BUDGET,
@@ -33,10 +34,13 @@ import {
   AppTab,
   BudgetConfig,
   CaptureSource,
+  DebtEntry,
+  Debtor,
   InboxItem,
   LivoraBackupPayload,
   SecuritySettings,
   Transaction,
+  type Wallet as WalletRecord,
 } from './types/life';
 import { CalendarViewMode, CATEGORIES, Task } from './types/task';
 import {
@@ -46,7 +50,6 @@ import {
   toISODate,
 } from './utils/dateUtils';
 import { parseQuickAmountVnd } from './utils/imageUtils';
-import { parseSmartTaskInput } from './utils/smartParser';
 import {
   createSyncChannel,
   loadLivoraState,
@@ -55,6 +58,11 @@ import {
 } from './utils/storage';
 
 const THEME_KEY = 'livora_theme_v1';
+const CUTE_THEME_KEY = 'livora_cute_theme_v1';
+const DEFAULT_WALLETS: WalletRecord[] = [
+  { id: 'cash', name: 'Tiền mặt', type: 'cash', openingBalance: 0, createdAt: new Date().toISOString() },
+  { id: 'bank', name: 'Tài khoản ngân hàng', type: 'bank', openingBalance: 0, createdAt: new Date().toISOString() },
+];
 
 interface ToastState {
   message: string;
@@ -69,6 +77,10 @@ export default function App() {
   const [budget, setBudget] = useState<BudgetConfig>(DEFAULT_BUDGET);
   const [inbox, setInbox] = useState<InboxItem[]>([]);
   const [security, setSecurity] = useState<SecuritySettings>(() => createDefaultSecurity());
+  const [wallets, setWallets] = useState<WalletRecord[]>(DEFAULT_WALLETS);
+  const [debtors, setDebtors] = useState<Debtor[]>([]);
+  const [debts, setDebts] = useState<DebtEntry[]>([]);
+  const [walletSetupOpen, setWalletSetupOpen] = useState(false);
   const [hydrated, setHydrated] = useState(false);
   const [locked, setLocked] = useState(false);
 
@@ -78,6 +90,9 @@ export default function App() {
     } catch {
       return false;
     }
+  });
+  const [cuteMode, setCuteMode] = useState<boolean>(() => {
+    try { return localStorage.getItem(CUTE_THEME_KEY) === 'true'; } catch { return false; }
   });
 
   const [activeTab, setActiveTab] = useState<AppTab>('dashboard');
@@ -103,7 +118,7 @@ export default function App() {
 
   const [focusTask, setFocusTask] = useState<Task | null>(null);
   const [securityOpen, setSecurityOpen] = useState(false);
-  const [lightbox, setLightbox] = useState<{ src: string; caption: string } | null>(null);
+  const [lightbox, setLightbox] = useState<{ src: string; caption: string; onRemove?: () => void } | null>(null);
   const [toast, setToast] = useState<ToastState | null>(null);
 
   const syncChannelRef = useRef<ReturnType<typeof createSyncChannel> | null>(null);
@@ -117,7 +132,7 @@ export default function App() {
       if (!mounted) return;
       if (saved) {
         if (Array.isArray(saved.tasks)) setTasks(saved.tasks);
-        if (Array.isArray(saved.transactions)) setTransactions(saved.transactions);
+        if (Array.isArray(saved.transactions)) setTransactions(saved.transactions.map((tx) => ({ ...tx, walletId: tx.walletId || 'cash' })));
         if (saved.budget) setBudget(saved.budget);
         if (Array.isArray(saved.inbox)) setInbox(saved.inbox);
         if (saved.security) {
@@ -126,6 +141,14 @@ export default function App() {
             setLocked(true);
           }
         }
+        if (Array.isArray(saved.wallets) && saved.wallets.length) {
+          setWallets(saved.wallets);
+          setWalletSetupOpen(saved.wallets.some((wallet) => !wallet.balanceConfirmed));
+        } else {
+          setWalletSetupOpen(true);
+        }
+        if (Array.isArray(saved.debtors)) setDebtors(saved.debtors);
+        if (Array.isArray(saved.debts)) setDebts(saved.debts);
       }
       setHydrated(true);
     });
@@ -137,6 +160,9 @@ export default function App() {
       setBudget(remote.budget);
       setInbox(remote.inbox);
       setSecurity(remote.security);
+      if (remote.wallets) setWallets(remote.wallets);
+      if (remote.debtors) setDebtors(remote.debtors);
+      if (remote.debts) setDebts(remote.debts);
     });
     syncChannelRef.current = channel;
 
@@ -159,10 +185,13 @@ export default function App() {
       budget,
       inbox,
       security,
+      wallets,
+      debtors,
+      debts,
     };
     saveLivoraState(payload);
     syncChannelRef.current?.broadcast(payload);
-  }, [hydrated, tasks, transactions, budget, inbox, security]);
+  }, [hydrated, tasks, transactions, budget, inbox, security, wallets, debtors, debts]);
 
   // Theme class sync
   useEffect(() => {
@@ -178,6 +207,10 @@ export default function App() {
       // Ignore
     }
   }, [darkMode]);
+  useEffect(() => {
+    document.documentElement.classList.toggle('cute', cuteMode);
+    try { localStorage.setItem(CUTE_THEME_KEY, String(cuteMode)); } catch { /* Ignore */ }
+  }, [cuteMode]);
 
   // Auto-hide toast
   useEffect(() => {
@@ -235,16 +268,14 @@ export default function App() {
     budget,
     inbox,
     security,
+    wallets,
+    debtors,
+    debts,
   });
 
   const showToast = (message: string, undoState?: PersistedLivoraState) => {
     setToast({ message, undoState });
   };
-
-  const quickParsed = useMemo(() => {
-    if (!quickInput.trim()) return null;
-    return parseSmartTaskInput(quickInput, selectedDate);
-  }, [quickInput, selectedDate]);
 
   const selectedDayTasks = useMemo(() => {
     return tasks
@@ -367,20 +398,19 @@ export default function App() {
   const handleInlineQuickAdd = (e: React.FormEvent) => {
     e.preventDefault();
     if (!quickInput.trim()) return;
-    const parsed = parseSmartTaskInput(quickInput, selectedDate);
-    const title = (parsed.title || quickInput).trim();
+    const title = quickInput.trim();
     if (!title) return;
 
     const newTask: Task = {
       id: `task-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
       title,
-      date: parsed.date || selectedDate,
-      time: parsed.time,
-      reminderMinutes: parsed.time ? 15 : undefined,
-      durationMinutes: parsed.durationMinutes || 30,
-      priority: parsed.priority || 'medium',
-      category: parsed.category || 'work',
-      recurrence: parsed.recurrence || 'none',
+      date: selectedDate,
+      time: undefined,
+      reminderMinutes: undefined,
+      durationMinutes: 30,
+      priority: 'medium',
+      category: 'work',
+      recurrence: 'none',
       completed: false,
       subtasks: [],
       focusMinutesLogged: 0,
@@ -441,10 +471,33 @@ export default function App() {
     txData: Omit<Transaction, 'id' | 'createdAt'>,
     editingId?: string
   ) => {
+    const syncDebtsForTransaction = (transaction: Transaction) => {
+      const drafts = transaction.type === 'expense' && transaction.isDebtSplit ? transaction.debtSplitDrafts || [] : [];
+      const knownDebtors = [...debtors];
+      const created: Debtor[] = [];
+      const resolved = drafts.map((draft) => {
+        let debtor = knownDebtors.find((item) => item.name.trim().toLocaleLowerCase('vi') === draft.name.trim().toLocaleLowerCase('vi'));
+        if (!debtor) {
+          debtor = { id: `debtor-${Date.now()}-${Math.random().toString(36).slice(2, 5)}`, name: draft.name, createdAt: new Date().toISOString() };
+          knownDebtors.push(debtor);
+          created.push(debtor);
+        }
+        return { draft, debtor };
+      });
+      if (created.length) setDebtors((prev) => [...prev, ...created.filter((person) => !prev.some((item) => item.id === person.id))]);
+      setDebts((prev) => [
+        ...prev.filter((debt) => debt.transactionId !== transaction.id),
+        ...resolved.map(({ draft, debtor }) => ({ id: `debt-${Date.now()}-${Math.random().toString(36).slice(2, 5)}`, transactionId: transaction.id, debtorId: debtor.id, amount: draft.amount, date: transaction.date, status: 'unpaid' as const, note: transaction.title })),
+      ]);
+    };
     if (editingId) {
+      const previous = transactions.find((transaction) => transaction.id === editingId);
+      if (!previous) return;
+      const updated: Transaction = { ...previous, ...txData };
       setTransactions((prev) =>
-        prev.map((t) => (t.id === editingId ? { ...t, ...txData } : t))
+        prev.map((t) => (t.id === editingId ? updated : t))
       );
+      syncDebtsForTransaction(updated);
       showToast('Đã cập nhật giao dịch.');
     } else {
       const newTx: Transaction = {
@@ -453,6 +506,7 @@ export default function App() {
         createdAt: new Date().toISOString(),
       };
       setTransactions((prev) => [newTx, ...prev]);
+      syncDebtsForTransaction(newTx);
       if (convertingInboxId) {
         setInbox((prev) => prev.filter((item) => item.id !== convertingInboxId));
         setConvertingInboxId(null);
@@ -478,6 +532,20 @@ export default function App() {
     );
     showToast('Đã lưu ảnh hóa đơn.');
   };
+
+  const handleAddDebtor = (name: string) => {
+    const existing = debtors.find((debtor) => debtor.name.trim().toLocaleLowerCase('vi') === name.trim().toLocaleLowerCase('vi'));
+    if (existing) return;
+    setDebtors((prev) => [...prev, { id: `debtor-${Date.now()}`, name, createdAt: new Date().toISOString() }]);
+  };
+  const handleAddDebt = (debtorId: string, amount: number, note: string) => {
+    setDebts((prev) => [...prev, { id: `debt-${Date.now()}`, debtorId, transactionId: '', amount, note: note || undefined, date: todayIso, status: 'unpaid' }]);
+  };
+  const handleToggleDebt = (id: string) => setDebts((prev) => prev.map((debt) => debt.id === id ? { ...debt, status: debt.status === 'paid' ? 'unpaid' : 'paid', paidAt: debt.status === 'paid' ? undefined : new Date().toISOString() } : debt));
+  const handleAttachDebtProof = (id: string, proofPhoto: string) => setDebts((prev) => prev.map((debt) => debt.id === id ? { ...debt, proofPhoto } : debt));
+  const handleRemoveDebtProof = (id: string) => setDebts((prev) => prev.map((debt) => debt.id === id ? { ...debt, proofPhoto: undefined } : debt));
+  const handleDeleteDebts = (ids: string[]) => setDebts((prev) => prev.filter((debt) => !ids.includes(debt.id)));
+  const handleDeleteDebtor = (id: string) => setDebtors((prev) => prev.filter((debtor) => debtor.id !== id));
 
   // Inbox & Quick Capture handlers
   const handleSaveToInbox = (payload: {
@@ -506,6 +574,9 @@ export default function App() {
       budget,
       inbox,
       security,
+      wallets,
+      debtors,
+      debts,
     };
     const blob = new Blob([JSON.stringify(payload, null, 2)], {
       type: 'application/json',
@@ -526,6 +597,9 @@ export default function App() {
     if (payload.security) {
       setSecurity({ ...payload.security, lastSyncedAt: new Date().toISOString() });
     }
+    if (Array.isArray(payload.wallets)) setWallets(payload.wallets);
+    if (Array.isArray(payload.debtors)) setDebtors(payload.debtors);
+    if (Array.isArray(payload.debts)) setDebts(payload.debts);
     showToast('Đã khôi phục toàn bộ dữ liệu thành công.');
   };
 
@@ -553,6 +627,10 @@ export default function App() {
     setBudget(DEFAULT_BUDGET);
     setInbox([]);
     setSecurity(createDefaultSecurity());
+    setWallets(DEFAULT_WALLETS);
+    setWalletSetupOpen(true);
+    setDebtors([]);
+    setDebts([]);
     setLocked(false);
     setSelectedDate(todayIso);
     showToast('Đã xóa sạch toàn bộ dữ liệu. Bạn có thể bắt đầu mới.');
@@ -620,6 +698,7 @@ export default function App() {
           >
             {darkMode ? <Sun className="w-5 h-5" /> : <Moon className="w-5 h-5" />}
           </button>
+          <button type="button" onClick={() => setCuteMode((value) => !value)} className="min-w-[44px] min-h-[44px] flex items-center justify-center rounded-xl text-slate-600 dark:text-slate-300 hover:bg-slate-100" aria-label="Bật hoặc tắt giao diện mèo dễ thương">🐱</button>
 
           <button
             type="button"
@@ -654,6 +733,7 @@ export default function App() {
               >
                 {darkMode ? <Sun className="w-4 h-4" /> : <Moon className="w-4 h-4" />}
               </button>
+              <button type="button" onClick={() => setCuteMode((value) => !value)} className="min-w-[40px] min-h-[40px] flex items-center justify-center rounded-xl text-slate-500 hover:bg-slate-100" aria-label="Giao diện mèo">🐱</button>
             </div>
 
             <button
@@ -791,11 +871,6 @@ export default function App() {
                       Thêm
                     </button>
                   </div>
-                  {quickParsed && quickParsed.matchedTokens.length > 0 && (
-                    <p className="text-[11px] text-teal-700 dark:text-teal-300 px-2 pb-0.5">
-                      Nhận diện: {quickParsed.matchedTokens.join(' · ')}
-                    </p>
-                  )}
                 </form>
               </div>
 
@@ -878,6 +953,7 @@ export default function App() {
             <div className="max-w-3xl mx-auto lg:mx-0">
               <FinanceView
                 transactions={transactions}
+                wallets={wallets}
                 budget={budget}
                 todayIso={todayIso}
                 hideBalances={security.hideBalances}
@@ -893,6 +969,16 @@ export default function App() {
                 onDeleteTransaction={handleDeleteTransaction}
                 onAttachReceipt={handleAttachReceipt}
                 onPreviewPhoto={(src, caption) => setLightbox({ src, caption })}
+                debtors={debtors}
+                debts={debts}
+                onAddDebtor={handleAddDebtor}
+                onAddDebt={handleAddDebt}
+                onToggleDebt={handleToggleDebt}
+                onAttachProof={handleAttachDebtProof}
+                onDeleteDebts={handleDeleteDebts}
+                onDeleteDebtor={handleDeleteDebtor}
+                onOpenWalletSetup={() => setWalletSetupOpen(true)}
+                onPreviewDebtProof={(debt) => debt.proofPhoto && setLightbox({ src: debt.proofPhoto, caption: `Ảnh chuyển khoản: ${debtors.find((person) => person.id === debt.debtorId)?.name || ''}`, onRemove: () => handleRemoveDebtProof(debt.id) })}
               />
             </div>
           )}
@@ -1071,6 +1157,9 @@ export default function App() {
         defaultAmount={txPrefill.amount}
         defaultReceiptPhoto={txPrefill.photo}
         todayIso={todayIso}
+        wallets={wallets}
+        debtors={debtors}
+        onAddDebtor={handleAddDebtor}
         onClose={() => {
           setTxSheetOpen(false);
           setEditingTx(null);
@@ -1078,6 +1167,16 @@ export default function App() {
           setConvertingInboxId(null);
         }}
         onSave={handleSaveTransaction}
+      />
+
+      <WalletBalanceSetupSheet
+        isOpen={walletSetupOpen}
+        wallets={wallets}
+        onSave={(nextWallets) => {
+          setWallets(nextWallets);
+          setWalletSetupOpen(false);
+          showToast('Đã cập nhật số dư ví thực tế.');
+        }}
       />
 
       {/* Quick Capture Sheet (Text / Voice / Camera) */}
@@ -1119,6 +1218,7 @@ export default function App() {
       <ImageLightboxModal
         src={lightbox?.src || null}
         caption={lightbox?.caption}
+        onRemove={lightbox?.onRemove}
         onClose={() => setLightbox(null)}
       />
     </div>

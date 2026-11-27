@@ -16,12 +16,17 @@ import {
   FinanceCategory,
   Transaction,
   TransactionType,
+  Wallet,
+  DebtEntry,
+  Debtor,
 } from '../types/life';
 import { addMonths, formatShortDateVi, MONTH_NAMES_VI, parseISODate } from '../utils/dateUtils';
 import { compressImageFile, formatVnd } from '../utils/imageUtils';
+import { DebtView } from './DebtView';
 
 interface FinanceViewProps {
   transactions: Transaction[];
+  wallets: Wallet[];
   budget: BudgetConfig;
   todayIso: string;
   hideBalances: boolean;
@@ -32,10 +37,21 @@ interface FinanceViewProps {
   onDeleteTransaction: (txId: string) => void;
   onAttachReceipt: (txId: string, photoDataUrl: string) => void;
   onPreviewPhoto: (src: string, caption: string) => void;
+  debtors: Debtor[];
+  debts: DebtEntry[];
+  onAddDebtor: (name: string) => void;
+  onAddDebt: (debtorId: string, amount: number, note: string) => void;
+  onToggleDebt: (id: string) => void;
+  onAttachProof: (id: string, photo: string) => void;
+  onDeleteDebts: (ids: string[]) => void;
+  onDeleteDebtor: (id: string) => void;
+  onOpenWalletSetup: () => void;
+  onPreviewDebtProof: (debt: DebtEntry) => void;
 }
 
 export const FinanceView: React.FC<FinanceViewProps> = ({
   transactions,
+  wallets,
   budget,
   todayIso,
   hideBalances,
@@ -46,8 +62,21 @@ export const FinanceView: React.FC<FinanceViewProps> = ({
   onDeleteTransaction,
   onAttachReceipt,
   onPreviewPhoto,
+  debtors,
+  debts,
+  onAddDebtor,
+  onAddDebt,
+  onToggleDebt,
+  onAttachProof,
+  onDeleteDebts,
+  onDeleteDebtor,
+  onOpenWalletSetup,
+  onPreviewDebtProof,
 }) => {
   const [monthAnchor, setMonthAnchor] = useState(todayIso);
+  const [period, setPeriod] = useState<'day' | 'week' | 'month' | 'year' | 'custom'>('month');
+  const [customStart, setCustomStart] = useState(todayIso);
+  const [customEnd, setCustomEnd] = useState(todayIso);
   const [typeFilter, setTypeFilter] = useState<'all' | TransactionType>('all');
   const [editingLimit, setEditingLimit] = useState(false);
   const [limitDraft, setLimitDraft] = useState(String(budget.monthlyLimit));
@@ -59,7 +88,10 @@ export const FinanceView: React.FC<FinanceViewProps> = ({
   const monthLabel = `${MONTH_NAMES_VI[parsedAnchor.getMonth()]}, ${parsedAnchor.getFullYear()}`;
 
   const monthStats = useMemo(() => {
-    const inMonth = transactions.filter((t) => t.date.startsWith(monthPrefix));
+    const anchor = parseISODate(monthAnchor);
+    const start = period === 'day' ? monthAnchor : period === 'week' ? new Date(anchor.getFullYear(), anchor.getMonth(), anchor.getDate() - ((anchor.getDay() + 6) % 7)).toISOString().slice(0, 10) : period === 'year' ? `${anchor.getFullYear()}-01-01` : period === 'custom' ? customStart : `${monthPrefix}-01`;
+    const end = period === 'day' ? monthAnchor : period === 'week' ? new Date(anchor.getFullYear(), anchor.getMonth(), anchor.getDate() + (6 - ((anchor.getDay() + 6) % 7))).toISOString().slice(0, 10) : period === 'year' ? `${anchor.getFullYear()}-12-31` : period === 'custom' ? customEnd : `${monthPrefix}-31`;
+    const inMonth = transactions.filter((t) => t.date >= start && t.date <= end);
     const income = inMonth
       .filter((t) => t.type === 'income')
       .reduce((sum, t) => sum + t.amount, 0);
@@ -78,13 +110,14 @@ export const FinanceView: React.FC<FinanceViewProps> = ({
         const spent = inMonth
           .filter((t) => t.type === 'expense' && t.category === catKey)
           .reduce((sum, t) => sum + t.amount, 0);
-        const cap = budget.categoryLimits[catKey] || 0;
+        const percentage = budget.categoryLimitPercents?.[catKey];
+        const cap = percentage === undefined ? (budget.categoryLimits[catKey] || 0) : Math.round(budget.monthlyLimit * percentage / 100);
         const pct = cap > 0 ? Math.round((spent / cap) * 100) : 0;
         return {
           meta: FINANCE_CATEGORIES[catKey],
           spent,
           cap,
-          pct,
+          pct, percentage,
         };
       })
       .filter((c) => c.spent > 0 || c.cap > 0);
@@ -95,7 +128,24 @@ export const FinanceView: React.FC<FinanceViewProps> = ({
       .sort((a, b) => b.date.localeCompare(a.date) || b.createdAt.localeCompare(a.createdAt));
 
     return { income, expense, balance, budgetPercent, byCategory, filtered };
-  }, [transactions, monthPrefix, budget, typeFilter]);
+  }, [transactions, monthPrefix, budget, typeFilter, period, monthAnchor, customStart, customEnd]);
+
+  // Current balance always uses the complete transaction history, not the selected report period.
+  const walletSummary = useMemo(() => {
+    const details = wallets.map((wallet) => {
+      const related = transactions.filter((transaction) => transaction.walletId === wallet.id);
+      const income = related.filter((transaction) => transaction.type === 'income').reduce((sum, transaction) => sum + transaction.amount, 0);
+      const expense = related.filter((transaction) => transaction.type === 'expense').reduce((sum, transaction) => sum + transaction.amount, 0);
+      return { wallet, income, expense, balance: wallet.openingBalance + income - expense };
+    });
+    return {
+      details,
+      opening: details.reduce((sum, item) => sum + item.wallet.openingBalance, 0),
+      income: details.reduce((sum, item) => sum + item.income, 0),
+      expense: details.reduce((sum, item) => sum + item.expense, 0),
+      balance: details.reduce((sum, item) => sum + item.balance, 0),
+    };
+  }, [wallets, transactions]);
 
   const handleSaveMonthlyLimit = () => {
     const val = Math.max(500000, Number(limitDraft.replace(/[^\d]/g, '')) || budget.monthlyLimit);
@@ -173,7 +223,20 @@ export const FinanceView: React.FC<FinanceViewProps> = ({
         </div>
       </div>
 
+      <div className="flex flex-wrap items-center gap-2 rounded-2xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 p-2">
+        {([{ id: 'day', label: 'Ngày' }, { id: 'week', label: 'Tuần' }, { id: 'month', label: 'Tháng' }, { id: 'year', label: 'Năm' }, { id: 'custom', label: 'Tùy chọn' }] as const).map((item) => <button key={item.id} type="button" onClick={() => setPeriod(item.id)} className={`min-h-[34px] px-3 rounded-lg text-xs font-medium ${period === item.id ? 'bg-teal-600 text-white' : 'text-slate-600 dark:text-slate-300'}`}>{item.label}</button>)}
+        {period === 'custom' && <><input type="date" value={customStart} onChange={(e) => setCustomStart(e.target.value)} className="min-h-[34px] rounded-lg border border-slate-200 px-2 text-xs dark:bg-slate-950 dark:border-slate-700" /><span className="text-xs">đến</span><input type="date" value={customEnd} min={customStart} onChange={(e) => setCustomEnd(e.target.value)} className="min-h-[34px] rounded-lg border border-slate-200 px-2 text-xs dark:bg-slate-950 dark:border-slate-700" /></>}
+      </div>
+
       {/* Balance & Monthly Budget Card */}
+      <section className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-3xl p-4 space-y-3">
+        <div className="flex items-start justify-between gap-3"><div><h3 className="font-display text-sm font-semibold text-slate-900 dark:text-slate-100">Ví tiền</h3><p className="text-[11px] text-slate-500 dark:text-slate-400 mt-0.5">Số dư được tự động cộng/trừ theo mọi giao dịch.</p></div><button type="button" onClick={onOpenWalletSetup} className="shrink-0 rounded-xl bg-slate-100 px-3 py-2 text-xs font-semibold text-slate-700 dark:bg-slate-800 dark:text-slate-200">Sửa số dư đầu kỳ</button></div>
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+          {walletSummary.details.map(({ wallet, income, expense, balance }) => <div key={wallet.id} className="rounded-2xl bg-slate-50 dark:bg-slate-950 p-3"><p className="text-xs text-slate-500">{wallet.type === 'cash' ? '💵 Tiền mặt' : '🏦 Tài khoản'} · {wallet.name}</p><p className="font-mono-nums text-lg font-semibold text-slate-900 dark:text-slate-100">{formatVnd(balance, hideBalances)}</p><p className="mt-1 text-[10px] text-slate-500">Đầu kỳ {formatVnd(wallet.openingBalance, hideBalances)} + thu {formatVnd(income, hideBalances)} − chi {formatVnd(expense, hideBalances)}</p></div>)}
+        </div>
+        <div className="rounded-2xl border border-teal-100 bg-teal-50/60 p-3 dark:border-teal-900/60 dark:bg-teal-950/20"><div className="flex items-center justify-between"><p className="text-xs font-semibold text-slate-700 dark:text-slate-200">Tổng số dư thực tế</p><p className="font-mono-nums text-lg font-bold text-teal-700 dark:text-teal-300">{formatVnd(walletSummary.balance, hideBalances)}</p></div><p className="mt-1 text-[10px] text-slate-500">Tổng đầu kỳ {formatVnd(walletSummary.opening, hideBalances)} + tổng thu {formatVnd(walletSummary.income, hideBalances)} − tổng chi {formatVnd(walletSummary.expense, hideBalances)}. Bằng tổng số dư các ví.</p></div>
+      </section>
+
       <section className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-3xl p-5 space-y-4">
         <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 pb-4 border-b border-slate-100 dark:border-slate-800">
           <div>
@@ -271,7 +334,7 @@ export const FinanceView: React.FC<FinanceViewProps> = ({
             Chi tiêu theo danh mục
           </h3>
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-3.5">
-            {monthStats.byCategory.map(({ meta, spent, cap, pct }) => (
+            {monthStats.byCategory.map(({ meta, spent, cap, pct, percentage }) => (
               <div key={meta.id} className="space-y-1.5">
                 <div className="flex items-center justify-between text-xs">
                   <span className="font-medium text-slate-700 dark:text-slate-300">
@@ -282,6 +345,7 @@ export const FinanceView: React.FC<FinanceViewProps> = ({
                     {cap > 0 && !hideBalances ? ` / ${Math.round(cap / 1000)}k` : ''}
                   </span>
                 </div>
+                <label className="flex items-center gap-1 text-[10px] text-slate-500">Hạn mức <input type="number" min="0" max="100" value={percentage ?? Math.round((cap / Math.max(1, budget.monthlyLimit)) * 100)} onChange={(e) => onUpdateBudget({ ...budget, categoryLimitPercents: { ...budget.categoryLimitPercents, [meta.id]: Math.min(100, Math.max(0, Number(e.target.value) || 0)) } })} className="w-12 rounded border border-slate-200 bg-transparent px-1 text-right dark:border-slate-700" />%</label>
                 <div className="w-full h-1.5 bg-slate-100 dark:bg-slate-800 rounded-full overflow-hidden">
                   <div
                     className={`h-full rounded-full ${
@@ -442,6 +506,7 @@ export const FinanceView: React.FC<FinanceViewProps> = ({
           </div>
         )}
       </section>
+      <DebtView debtors={debtors} debts={debts} transactions={transactions} todayIso={todayIso} onAddDebtor={onAddDebtor} onAddDebt={onAddDebt} onToggleDebt={onToggleDebt} onAttachProof={onAttachProof} onDeleteDebts={onDeleteDebts} onDeleteDebtor={onDeleteDebtor} onPreviewProof={onPreviewDebtProof} />
     </div>
   );
 };

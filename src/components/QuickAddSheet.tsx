@@ -1,5 +1,7 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { Bell, Camera, Clock, Plus, Sparkles, Trash2, X } from 'lucide-react';
+import React, { useEffect, useRef, useState } from 'react';
+import { Bell, Camera, FileText, Mic, Plus, Trash2, X } from 'lucide-react';
+import { Capacitor } from '@capacitor/core';
+import { SpeechRecognition } from '@capacitor-community/speech-recognition';
 import {
   CATEGORIES,
   PRIORITY_LABELS,
@@ -13,7 +15,6 @@ import {
 } from '../types/task';
 import { addDays, formatShortDateVi } from '../utils/dateUtils';
 import { compressImageFile } from '../utils/imageUtils';
-import { parseSmartTaskInput, suggestFreeTimeSlot } from '../utils/smartParser';
 
 interface QuickAddSheetProps {
   isOpen: boolean;
@@ -52,11 +53,15 @@ export const QuickAddSheet: React.FC<QuickAddSheetProps> = ({
   const [subtasks, setSubtasks] = useState<Subtask[]>([]);
   const [newSubtask, setNewSubtask] = useState('');
   const [descriptionPhoto, setDescriptionPhoto] = useState<string | undefined>(undefined);
+  const [attachment, setAttachment] = useState<import('../types/task').LocalAttachment | undefined>(undefined);
   const [proofPhoto, setProofPhoto] = useState<string | undefined>(undefined);
-  const [useSmartParse, setUseSmartParse] = useState(true);
+  const [proofAttachment, setProofAttachment] = useState<import('../types/task').LocalAttachment | undefined>(undefined);
+  const [micStatus, setMicStatus] = useState('');
 
   const descPhotoRef = useRef<HTMLInputElement | null>(null);
+  const descCameraRef = useRef<HTMLInputElement | null>(null);
   const proofPhotoRef = useRef<HTMLInputElement | null>(null);
+  const proofCameraRef = useRef<HTMLInputElement | null>(null);
 
   useEffect(() => {
     if (!isOpen) return;
@@ -72,8 +77,9 @@ export const QuickAddSheet: React.FC<QuickAddSheetProps> = ({
       setRecurrence(editingTask.recurrence);
       setSubtasks(editingTask.subtasks);
       setDescriptionPhoto(editingTask.descriptionPhoto);
+      setAttachment(editingTask.attachment);
       setProofPhoto(editingTask.proofPhoto);
-      setUseSmartParse(false);
+      setProofAttachment(editingTask.proofAttachment);
     } else {
       setRawTitle(defaultTitle || '');
       setNotes('');
@@ -86,22 +92,13 @@ export const QuickAddSheet: React.FC<QuickAddSheetProps> = ({
       setRecurrence('none');
       setSubtasks([]);
       setDescriptionPhoto(defaultPhoto);
+      setAttachment(undefined);
       setProofPhoto(undefined);
-      setUseSmartParse(true);
+      setProofAttachment(undefined);
     }
     setNewSubtask('');
+    setMicStatus('');
   }, [isOpen, editingTask, defaultDate, defaultTitle, defaultPhoto]);
-
-  const parsedPreview = useMemo(() => {
-    if (!useSmartParse || !rawTitle.trim()) return null;
-    return parseSmartTaskInput(rawTitle, todayIso);
-  }, [useSmartParse, rawTitle, todayIso]);
-
-  const suggestedSlot = useMemo(() => {
-    const targetDate = parsedPreview?.date || date;
-    const tasksOnDate = allTasks.filter((t) => t.date === targetDate);
-    return suggestFreeTimeSlot(tasksOnDate);
-  }, [allTasks, date, parsedPreview]);
 
   if (!isOpen) return null;
 
@@ -120,6 +117,44 @@ export const QuickAddSheet: React.FC<QuickAddSheetProps> = ({
       e.target.value = '';
     }
   };
+  const handleDescriptionFile = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    if (file.type.startsWith('image/')) {
+      setDescriptionPhoto(await compressImageFile(file)); setAttachment(undefined);
+    } else {
+      const reader = new FileReader();
+      reader.onload = () => setAttachment({ name: file.name, mimeType: file.type, dataUrl: String(reader.result) });
+      reader.readAsDataURL(file);
+    }
+    e.target.value = '';
+  };
+  const handleProofFile = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    if (file.type.startsWith('image/')) {
+      setProofPhoto(await compressImageFile(file)); setProofAttachment(undefined);
+    } else {
+      const reader = new FileReader();
+      reader.onload = () => setProofAttachment({ name: file.name, mimeType: file.type, dataUrl: String(reader.result) });
+      reader.readAsDataURL(file);
+    }
+    e.target.value = '';
+  };
+  const dictateTitle = async () => {
+    if (!Capacitor.isNativePlatform()) { setMicStatus('Nhập giọng nói chỉ hoạt động trong APK.'); return; }
+    try {
+      const { available } = await SpeechRecognition.available();
+      if (!available) { setMicStatus('Thiết bị chưa có dịch vụ nhận giọng nói.'); return; }
+      let permission = await SpeechRecognition.checkPermissions();
+      if (permission.speechRecognition !== 'granted') permission = await SpeechRecognition.requestPermissions();
+      if (permission.speechRecognition !== 'granted') { setMicStatus('Bạn chưa cấp quyền micro.'); return; }
+      setMicStatus('Đang nghe… hãy nói tiêu đề.');
+      const listener = await SpeechRecognition.addListener('partialResults', ({ matches }) => { if (matches?.[0]) setRawTitle(matches[0]); });
+      await SpeechRecognition.start({ language: 'vi-VN', maxResults: 1, partialResults: true, popup: false });
+      window.setTimeout(() => { void SpeechRecognition.stop(); void listener.remove(); setMicStatus(''); }, 10000);
+    } catch { setMicStatus('Không thể mở micro. Kiểm tra quyền trong Cài đặt ứng dụng.'); }
+  };
 
   const handleAddSubtask = () => {
     const trimmed = newSubtask.trim();
@@ -133,28 +168,29 @@ export const QuickAddSheet: React.FC<QuickAddSheetProps> = ({
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
-    const parsed = useSmartParse ? parseSmartTaskInput(rawTitle, todayIso) : null;
-    const finalTitle = (parsed?.title || rawTitle).trim();
+    const finalTitle = rawTitle.trim();
     if (!finalTitle) return;
 
-    const finalTime = parsed?.time || time || undefined;
+    const finalTime = time || undefined;
 
     onSave(
       {
         title: finalTitle,
         notes: notes.trim() || undefined,
-        date: parsed?.date || date,
+        date,
         time: finalTime,
-        durationMinutes: parsed?.durationMinutes || durationMinutes,
+        durationMinutes,
         reminderMinutes: finalTime ? reminderMinutes : undefined,
-        priority: parsed?.priority || priority,
-        category: parsed?.category || category,
-        recurrence: parsed?.recurrence || recurrence,
+        priority,
+        category,
+        recurrence,
         completed: editingTask ? editingTask.completed : false,
         completedAt: editingTask?.completedAt,
         subtasks,
         descriptionPhoto,
+        attachment,
         proofPhoto,
+        proofAttachment,
       },
       editingTask?.id
     );
@@ -195,23 +231,7 @@ export const QuickAddSheet: React.FC<QuickAddSheetProps> = ({
           {/* Smart Title Input */}
           <div className="space-y-2">
             <div className="flex items-center justify-between">
-              <label htmlFor="task-title-input" className="text-xs font-medium text-slate-600 dark:text-slate-400">
-                Tên công việc / Sự kiện
-              </label>
-              {!editingTask && (
-                <button
-                  type="button"
-                  onClick={() => setUseSmartParse((v) => !v)}
-                  className={`inline-flex items-center gap-1 text-xs font-medium px-2 py-1 rounded-lg transition-colors ${
-                    useSmartParse
-                      ? 'text-teal-700 dark:text-teal-300 bg-teal-50 dark:bg-teal-950/60'
-                      : 'text-slate-500 bg-slate-100 dark:bg-slate-800'
-                  }`}
-                >
-                  <Sparkles className="w-3.5 h-3.5" />
-                  <span>Nhận diện thông minh: {useSmartParse ? 'Bật' : 'Tắt'}</span>
-                </button>
-              )}
+              <div className="flex items-center gap-1"><label htmlFor="task-title-input" className="text-xs font-medium text-slate-600 dark:text-slate-400">Tên công việc / Sự kiện</label><button type="button" onClick={() => void dictateTitle()} className="text-teal-600" aria-label="Nhập tiêu đề bằng giọng nói"><Mic className="w-4 h-4" /></button></div>
             </div>
 
             <input
@@ -221,19 +241,11 @@ export const QuickAddSheet: React.FC<QuickAddSheetProps> = ({
               required
               value={rawTitle}
               onChange={(e) => setRawTitle(e.target.value)}
-              placeholder={
-                useSmartParse
-                  ? 'VD: Họp nhóm 14:30 ngày mai 45p !cao #cv'
-                  : 'Nhập tên công việc...'
-              }
+              placeholder="Nhập tên công việc..."
               className="w-full min-h-[48px] px-4 py-2.5 rounded-2xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-950 text-slate-900 dark:text-slate-100 text-[15px] placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-teal-600"
             />
+            {micStatus && <p className="text-[11px] text-teal-700 dark:text-teal-300">{micStatus}</p>}
 
-            {useSmartParse && parsedPreview && parsedPreview.matchedTokens.length > 0 && (
-              <p className="text-xs text-teal-700 dark:text-teal-300 leading-relaxed">
-                Tự động nhận diện: {parsedPreview.matchedTokens.join(' · ')}
-              </p>
-            )}
           </div>
 
           {/* Date & Time Row */}
@@ -275,14 +287,6 @@ export const QuickAddSheet: React.FC<QuickAddSheetProps> = ({
                 <label htmlFor="task-time-input" className="text-xs font-medium text-slate-600 dark:text-slate-400">
                   Khung giờ & Nhắc nhở
                 </label>
-                <button
-                  type="button"
-                  onClick={() => setTime(suggestedSlot)}
-                  className="inline-flex items-center gap-1 text-xs font-medium text-teal-700 dark:text-teal-300 hover:underline"
-                >
-                  <Clock className="w-3 h-3" />
-                  <span>Gợi ý ({suggestedSlot})</span>
-                </button>
               </div>
               <input
                 id="task-time-input"
@@ -319,59 +323,55 @@ export const QuickAddSheet: React.FC<QuickAddSheetProps> = ({
             <input
               ref={descPhotoRef}
               type="file"
-              accept="image/*"
-              capture="environment"
-              onChange={(e) => handlePhotoPick(e, setDescriptionPhoto)}
+              accept="image/*,.pdf,.doc,.docx,application/pdf"
+              onChange={handleDescriptionFile}
               className="hidden"
             />
+            <input ref={descCameraRef} type="file" accept="image/*" capture="environment" onChange={(e) => handlePhotoPick(e, setDescriptionPhoto)} className="hidden" />
             <input
               ref={proofPhotoRef}
               type="file"
-              accept="image/*"
-              capture="environment"
-              onChange={(e) => handlePhotoPick(e, setProofPhoto)}
+              accept="image/*,.pdf,.doc,.docx,application/pdf"
+              onChange={handleProofFile}
               className="hidden"
             />
+            <input ref={proofCameraRef} type="file" accept="image/*" capture="environment" onChange={(e) => handlePhotoPick(e, setProofPhoto)} className="hidden" />
+            <button type="button" onClick={() => proofCameraRef.current?.click()} className="min-h-[34px] rounded-lg bg-emerald-50 px-3 text-xs font-semibold text-emerald-700 dark:bg-emerald-950/50 dark:text-emerald-300">Chụp nhanh minh chứng</button>
             <div className="grid grid-cols-2 gap-2.5">
               <div className="rounded-2xl border border-dashed border-slate-300 dark:border-slate-700 p-2.5 flex flex-col items-center justify-center gap-2 bg-slate-50/50 dark:bg-slate-950/50">
-                {descriptionPhoto ? (
+                {descriptionPhoto || attachment ? (
                   <>
-                    <img
+                    {descriptionPhoto && <img
                       src={descriptionPhoto}
                       alt="Ảnh mô tả công việc"
                       className="w-full h-24 object-cover rounded-xl"
-                    />
+                    />}
+                    {attachment && <p className="text-xs flex items-center gap-1"><FileText className="w-4 h-4" />{attachment.name}</p>}
                     <button
                       type="button"
-                      onClick={() => setDescriptionPhoto(undefined)}
+                      onClick={() => { setDescriptionPhoto(undefined); setAttachment(undefined); }}
                       className="text-xs font-medium text-rose-600 dark:text-rose-400"
                     >
                       Xóa ảnh mô tả
                     </button>
                   </>
                 ) : (
-                  <button
-                    type="button"
-                    onClick={() => descPhotoRef.current?.click()}
-                    className="w-full min-h-[60px] flex flex-col items-center justify-center gap-1 text-xs font-medium text-slate-600 dark:text-slate-300"
-                  >
-                    <Camera className="w-4 h-4 text-teal-600 dark:text-teal-400" />
-                    <span>Chụp / Thêm ảnh mô tả</span>
-                  </button>
+                  <div className="w-full flex gap-2"><button type="button" onClick={() => descCameraRef.current?.click()} className="flex-1 min-h-[60px] flex flex-col items-center justify-center gap-1 text-xs font-medium text-slate-600 dark:text-slate-300"><Camera className="w-4 h-4 text-teal-600" /><span>Chụp ảnh</span></button><button type="button" onClick={() => descPhotoRef.current?.click()} className="flex-1 min-h-[60px] flex flex-col items-center justify-center gap-1 text-xs font-medium text-slate-600 dark:text-slate-300"><FileText className="w-4 h-4 text-teal-600" /><span>Tải tệp</span></button></div>
                 )}
               </div>
 
               <div className="rounded-2xl border border-dashed border-slate-300 dark:border-slate-700 p-2.5 flex flex-col items-center justify-center gap-2 bg-slate-50/50 dark:bg-slate-950/50">
-                {proofPhoto ? (
+                {proofPhoto || proofAttachment ? (
                   <>
-                    <img
+                    {proofPhoto && <img
                       src={proofPhoto}
                       alt="Ảnh minh chứng hoàn thành"
                       className="w-full h-24 object-cover rounded-xl"
-                    />
+                    />}
+                    {proofAttachment && <p className="text-xs flex items-center gap-1"><FileText className="w-4 h-4" />{proofAttachment.name}</p>}
                     <button
                       type="button"
-                      onClick={() => setProofPhoto(undefined)}
+                      onClick={() => { setProofPhoto(undefined); setProofAttachment(undefined); }}
                       className="text-xs font-medium text-rose-600 dark:text-rose-400"
                     >
                       Xóa minh chứng
@@ -558,11 +558,10 @@ export const QuickAddSheet: React.FC<QuickAddSheetProps> = ({
             >
               {editingTask
                 ? 'Lưu thay đổi'
-                : `Lưu công việc · ${formatShortDateVi(parsedPreview?.date || date)}`}
+                : `Lưu công việc · ${formatShortDateVi(date)}`}
             </button>
             <p className="mt-2 text-center text-[11px] text-slate-400 dark:text-slate-500">
-              Mức độ: {PRIORITY_LABELS[parsedPreview?.priority || priority]} · Nhóm:{' '}
-              {CATEGORIES[parsedPreview?.category || category].label}
+              Mức độ: {PRIORITY_LABELS[priority]} · Nhóm: {CATEGORIES[category].label}
             </p>
           </div>
         </form>

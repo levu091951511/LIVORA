@@ -1,4 +1,4 @@
-import { BudgetConfig, InboxItem, SecuritySettings, Transaction } from '../types/life';
+import { BudgetConfig, DebtEntry, Debtor, InboxItem, SecuritySettings, Transaction, Wallet } from '../types/life';
 import { Task } from '../types/task';
 
 const DB_NAME = 'livora_db_v1';
@@ -13,6 +13,9 @@ export interface PersistedLivoraState {
   budget: BudgetConfig;
   inbox: InboxItem[];
   security: SecuritySettings;
+  wallets?: Wallet[];
+  debtors?: Debtor[];
+  debts?: DebtEntry[];
 }
 
 function openDatabase(): Promise<IDBDatabase> {

@@ -1,6 +1,43 @@
 export type AppTab = 'dashboard' | 'calendar' | 'finance' | 'inbox' | 'progress';
 
 export type TransactionType = 'expense' | 'income';
+export type WalletType = 'cash' | 'bank';
+
+export interface Wallet {
+  id: string;
+  name: string;
+  type: WalletType;
+  openingBalance: number;
+  createdAt: string;
+  balanceConfirmed?: boolean;
+}
+
+export interface Debtor {
+  id: string;
+  name: string;
+  phone?: string;
+  createdAt: string;
+}
+
+export interface DebtEntry {
+  id: string;
+  transactionId: string;
+  debtorId: string;
+  amount: number;
+  date: string;
+  status: 'unpaid' | 'paid';
+  paidAt?: string;
+  proofPhoto?: string;
+  note?: string;
+}
+export interface DebtSplit {
+  debtorId: string;
+  amount: number;
+}
+export interface DebtSplitDraft {
+  name: string;
+  amount: number;
+}
 
 export type FinanceCategory =
   | 'food'
@@ -21,12 +58,18 @@ export interface Transaction {
   date: string; // YYYY-MM-DD
   note?: string;
   receiptPhoto?: string; // Compressed JPEG data URL
+  walletId?: string;
+  isDebtSplit?: boolean;
+  ownShare?: number;
+  debtSplits?: DebtSplit[];
+  debtSplitDrafts?: DebtSplitDraft[];
   createdAt: string;
 }
 
 export interface BudgetConfig {
   monthlyLimit: number;
   categoryLimits: Partial<Record<FinanceCategory, number>>;
+  categoryLimitPercents?: Partial<Record<FinanceCategory, number>>;
 }
 
 export type CaptureSource = 'text' | 'voice' | 'image';
@@ -56,6 +99,9 @@ export interface LivoraBackupPayload {
   budget: BudgetConfig;
   inbox: InboxItem[];
   security: SecuritySettings;
+  wallets?: Wallet[];
+  debtors?: Debtor[];
+  debts?: DebtEntry[];
 }
 
 export interface FinanceCategoryMeta {

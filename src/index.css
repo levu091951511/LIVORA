@@ -44,6 +44,14 @@
   scrollbar-width: none;
 }
 
+.cute body, .cute .bg-slate-50 { background-color: #fff1f7 !important; }
+.cute .bg-white { background-color: #fffafd !important; }
+.cute .bg-slate-900 { background-color: #ec4899 !important; }
+.cute .text-teal-600, .cute .text-teal-700 { color: #db2777 !important; }
+.cute .bg-teal-600 { background-color: #ec4899 !important; }
+.cute .border-slate-200 { border-color: #fbcfe8 !important; }
+.cute .bg-teal-50 { background-color: #fce7f3 !important; }
+
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after {
     animation-duration: 0.01ms !important;

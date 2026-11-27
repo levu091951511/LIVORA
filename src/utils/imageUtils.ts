@@ -42,6 +42,12 @@ export function formatVnd(amount: number, hidden = false): string {
   return `${new Intl.NumberFormat('vi-VN').format(Math.round(amount))} ₫`;
 }
 
+/** Keeps numeric input local while showing Vietnamese thousands separators. */
+export function formatVndInput(value: string | number): string {
+  const digits = String(value).replace(/[^\d]/g, '').replace(/^0+(?=\d)/, '');
+  return digits ? new Intl.NumberFormat('vi-VN').format(Number(digits)) : '';
+}
+
 export function parseQuickAmountVnd(text: string): number | undefined {
   const match = text.match(/(\d+(?:[.,]\d+)?)\s*(k|nghin|nghìn|tr|trieu|triệu|d|đ)\b/i);
   if (!match) return undefined;

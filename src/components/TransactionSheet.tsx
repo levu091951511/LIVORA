@@ -1,12 +1,16 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { Camera, X } from 'lucide-react';
+import { Camera, Mic, X } from 'lucide-react';
+import { Capacitor } from '@capacitor/core';
+import { SpeechRecognition } from '@capacitor-community/speech-recognition';
 import {
   FINANCE_CATEGORIES,
   FinanceCategory,
   Transaction,
   TransactionType,
+  Wallet,
+  Debtor,
 } from '../types/life';
-import { compressImageFile, formatVnd } from '../utils/imageUtils';
+import { compressImageFile, formatVnd, formatVndInput } from '../utils/imageUtils';
 
 interface TransactionSheetProps {
   isOpen: boolean;
@@ -15,6 +19,9 @@ interface TransactionSheetProps {
   defaultAmount?: number;
   defaultReceiptPhoto?: string;
   todayIso: string;
+  wallets: Wallet[];
+  debtors: Debtor[];
+  onAddDebtor: (name: string) => void;
   onClose: () => void;
   onSave: (
     txData: Omit<Transaction, 'id' | 'createdAt'>,
@@ -31,6 +38,9 @@ export const TransactionSheet: React.FC<TransactionSheetProps> = ({
   defaultAmount,
   defaultReceiptPhoto,
   todayIso,
+  wallets,
+  debtors,
+  onAddDebtor,
   onClose,
   onSave,
 }) => {
@@ -41,18 +51,29 @@ export const TransactionSheet: React.FC<TransactionSheetProps> = ({
   const [date, setDate] = useState(todayIso);
   const [note, setNote] = useState('');
   const [receiptPhoto, setReceiptPhoto] = useState<string | undefined>(undefined);
+  const [walletId, setWalletId] = useState('cash');
+  const [isDebtSplit, setIsDebtSplit] = useState(false);
+  const [ownShare, setOwnShare] = useState('');
+  const [debtRows, setDebtRows] = useState<Array<{ name: string; amount: string }>>([]);
+  const [newDebtorName, setNewDebtorName] = useState('');
+  const [micStatus, setMicStatus] = useState('');
+  const [isListening, setIsListening] = useState(false);
   const receiptInputRef = useRef<HTMLInputElement | null>(null);
+  const speechListenerRef = useRef<{ remove: () => Promise<void> } | null>(null);
+  const speechTimerRef = useRef<number | null>(null);
 
   useEffect(() => {
     if (!isOpen) return;
     if (editingTx) {
       setType(editingTx.type);
       setTitle(editingTx.title);
-      setAmountInput(String(editingTx.amount));
+      setAmountInput(formatVndInput(editingTx.amount));
       setCategory(editingTx.category);
       setDate(editingTx.date);
       setNote(editingTx.note || '');
       setReceiptPhoto(editingTx.receiptPhoto);
+      setWalletId(editingTx.walletId || 'cash');
+      setIsDebtSplit(Boolean(editingTx.isDebtSplit)); setOwnShare(formatVndInput(editingTx.ownShare || '')); setDebtRows((editingTx.debtSplitDrafts || []).map((item) => ({ name: item.name, amount: formatVndInput(item.amount) }))); setNewDebtorName(''); setMicStatus('');
     } else {
       setType('expense');
       setTitle(defaultTitle || '');
@@ -61,6 +82,8 @@ export const TransactionSheet: React.FC<TransactionSheetProps> = ({
       setDate(todayIso);
       setNote('');
       setReceiptPhoto(defaultReceiptPhoto);
+      setWalletId('cash');
+      setIsDebtSplit(false); setOwnShare(''); setDebtRows([]); setNewDebtorName(''); setMicStatus('');
     }
   }, [isOpen, editingTx, defaultTitle, defaultAmount, defaultReceiptPhoto, todayIso]);
 
@@ -93,10 +116,40 @@ export const TransactionSheet: React.FC<TransactionSheetProps> = ({
         date,
         note: note.trim() || undefined,
         receiptPhoto,
+        walletId,
+        isDebtSplit,
+        ownShare: isDebtSplit ? Number(ownShare.replace(/[^\d]/g, '')) || 0 : undefined,
+        debtSplitDrafts: isDebtSplit ? debtRows.map((row) => ({ name: row.name.trim(), amount: Number(row.amount.replace(/[^\d]/g, '')) || 0 })).filter((item) => item.name && item.amount > 0) : undefined,
       },
       editingTx?.id
     );
     onClose();
+  };
+
+  const stopDictation = async () => {
+    if (speechTimerRef.current) window.clearTimeout(speechTimerRef.current);
+    speechTimerRef.current = null;
+    try { await SpeechRecognition.stop(); } catch { /* Session may already have stopped. */ }
+    await speechListenerRef.current?.remove();
+    speechListenerRef.current = null;
+    setIsListening(false);
+    setMicStatus('');
+  };
+  const dictateTitle = async () => {
+    if (isListening) { await stopDictation(); return; }
+    if (!Capacitor.isNativePlatform()) { setMicStatus('Nhập giọng nói chỉ hoạt động trong APK.'); return; }
+    try {
+      const { available } = await SpeechRecognition.available();
+      if (!available) { setMicStatus('Thiết bị chưa có dịch vụ nhận giọng nói.'); return; }
+      let permission = await SpeechRecognition.checkPermissions();
+      if (permission.speechRecognition !== 'granted') permission = await SpeechRecognition.requestPermissions();
+      if (permission.speechRecognition !== 'granted') { setMicStatus('Bạn chưa cấp quyền micro.'); return; }
+      setMicStatus('Đang nghe… hãy nói tiêu đề.');
+      speechListenerRef.current = await SpeechRecognition.addListener('partialResults', ({ matches }) => { if (matches?.[0]) setTitle(matches[0]); });
+      await SpeechRecognition.start({ language: 'vi-VN', maxResults: 1, partialResults: true, popup: false });
+      setIsListening(true);
+      speechTimerRef.current = window.setTimeout(() => { void stopDictation(); }, 10000);
+    } catch { setMicStatus('Không thể mở micro. Kiểm tra quyền trong Cài đặt ứng dụng.'); }
   };
 
   const availableCategories = (Object.keys(FINANCE_CATEGORIES) as FinanceCategory[]).filter(
@@ -176,14 +229,14 @@ export const TransactionSheet: React.FC<TransactionSheetProps> = ({
             </label>
             <input
               id="tx-amount"
-              type="number"
+              type="text"
               inputMode="numeric"
               min={1000}
               step={1000}
               required
               value={amountInput}
-              onChange={(e) => setAmountInput(e.target.value)}
-              placeholder="VD: 150000"
+              onChange={(e) => setAmountInput(formatVndInput(e.target.value))}
+              placeholder="VD: 150.000"
               className="w-full min-h-[50px] px-4 rounded-2xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-950 font-mono-nums text-xl font-semibold text-slate-900 dark:text-slate-100 focus:outline-none focus:ring-2 focus:ring-teal-600"
             />
             {parsedAmount > 0 && (
@@ -196,7 +249,7 @@ export const TransactionSheet: React.FC<TransactionSheetProps> = ({
                 <button
                   key={amt}
                   type="button"
-                  onClick={() => setAmountInput(String(amt))}
+                  onClick={() => setAmountInput(formatVndInput(amt))}
                   className="min-h-[36px] px-3 rounded-xl bg-slate-100 dark:bg-slate-800 text-xs font-mono-nums font-medium text-slate-700 dark:text-slate-300 hover:bg-slate-200 dark:hover:bg-slate-700"
                 >
                   {amt / 1000}k
@@ -208,9 +261,7 @@ export const TransactionSheet: React.FC<TransactionSheetProps> = ({
           {/* Title & Date */}
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
             <div className="space-y-1.5">
-              <label htmlFor="tx-title" className="block text-xs font-medium text-slate-600 dark:text-slate-400">
-                Nội dung
-              </label>
+              <div className="flex items-center justify-between"><label htmlFor="tx-title" className="block text-xs font-medium text-slate-600 dark:text-slate-400">Tiêu đề</label><button type="button" onClick={() => void dictateTitle()} className={`px-2 py-1 rounded-lg text-xs ${isListening ? 'bg-rose-100 text-rose-700' : 'text-teal-600'}`} aria-label="Nhập tiêu đề bằng giọng nói">{isListening ? 'Dừng nghe' : <Mic className="w-4 h-4" />}</button></div>
               <input
                 id="tx-title"
                 type="text"
@@ -220,6 +271,7 @@ export const TransactionSheet: React.FC<TransactionSheetProps> = ({
                 placeholder="VD: Ăn tối, Đổ xăng..."
                 className="w-full min-h-[44px] px-3.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-950 text-sm text-slate-900 dark:text-slate-100 focus:outline-none focus:ring-2 focus:ring-teal-600"
               />
+              {micStatus && <p className="text-[11px] text-teal-700 dark:text-teal-300">{micStatus}</p>}
             </div>
 
             <div className="space-y-1.5">
@@ -234,6 +286,13 @@ export const TransactionSheet: React.FC<TransactionSheetProps> = ({
                 className="w-full min-h-[44px] px-3.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-950 text-sm font-mono-nums text-slate-900 dark:text-slate-100 focus:outline-none focus:ring-2 focus:ring-teal-600"
               />
             </div>
+          </div>
+
+          <div className="space-y-1.5">
+            <label className="block text-xs font-medium text-slate-600 dark:text-slate-400">Ví nhận / chi tiền</label>
+            <select value={walletId} onChange={(e) => setWalletId(e.target.value)} className="w-full min-h-[44px] px-3.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-950 text-sm">
+              {wallets.map((wallet) => <option key={wallet.id} value={wallet.id}>{wallet.type === 'cash' ? '💵 ' : '🏦 '}{wallet.name}</option>)}
+            </select>
           </div>
 
           {/* Categories */}
@@ -272,7 +331,6 @@ export const TransactionSheet: React.FC<TransactionSheetProps> = ({
               ref={receiptInputRef}
               type="file"
               accept="image/*"
-              capture="environment"
               onChange={handleReceiptPick}
               className="hidden"
             />
@@ -318,6 +376,8 @@ export const TransactionSheet: React.FC<TransactionSheetProps> = ({
           </div>
 
           {/* Note */}
+          {type === 'expense' && <div className="space-y-2 rounded-2xl border border-amber-200 bg-amber-50/60 p-3 dark:border-amber-900/60 dark:bg-amber-950/20"><label className="flex items-center gap-2 text-xs font-semibold"><input type="checkbox" checked={isDebtSplit} onChange={(e) => setIsDebtSplit(e.target.checked)} /> Ghi nợ / chia bill</label>{isDebtSplit && <><input inputMode="numeric" value={ownShare} onChange={(e) => setOwnShare(formatVndInput(e.target.value))} placeholder="Phần của tôi (0 nếu không tham gia)" className="w-full min-h-[40px] rounded-xl border border-amber-200 bg-white px-3 text-sm dark:bg-slate-950" /><div className="flex gap-1"><input value={newDebtorName} onChange={(e) => setNewDebtorName(e.target.value)} placeholder="Thêm người nợ mới" className="min-w-0 flex-1 min-h-[40px] rounded-xl border border-amber-200 bg-white px-3 text-sm dark:bg-slate-950" /><button type="button" onClick={() => { const name = newDebtorName.trim(); if (!name) return; onAddDebtor(name); setDebtRows((rows) => [...rows, { name, amount: '' }]); setNewDebtorName(''); }} className="rounded-xl bg-amber-600 px-3 text-xs font-semibold text-white">Thêm</button></div><p className="text-[11px] text-amber-800 dark:text-amber-200">Chọn từ danh bạ hoặc thêm người mới, rồi nhập phần tiền họ nợ.</p>{debtRows.map((row, index) => <div key={`${index}-${row.name}`} className="flex gap-1"><select value={row.name} onChange={(e) => setDebtRows((rows) => rows.map((item, i) => i === index ? { ...item, name: e.target.value } : item))} className="min-w-0 flex-1 min-h-[40px] rounded-xl border border-amber-200 bg-white px-2 text-sm dark:bg-slate-950"><option value="">Chọn người nợ</option>{debtors.map((person) => <option key={person.id} value={person.name}>{person.name}</option>)}</select><input value={row.amount} onChange={(e) => setDebtRows((rows) => rows.map((item, i) => i === index ? { ...item, amount: formatVndInput(e.target.value) } : item))} inputMode="numeric" placeholder="Số tiền" className="w-28 min-h-[40px] rounded-xl border border-amber-200 bg-white px-2 text-sm dark:bg-slate-950" /><button type="button" onClick={() => setDebtRows((rows) => rows.filter((_, i) => i !== index))} className="px-2 text-xs text-rose-600">Xóa</button></div>)}<button type="button" onClick={() => setDebtRows((rows) => [...rows, { name: '', amount: '' }])} className="text-xs font-semibold text-amber-800 dark:text-amber-200">+ Thêm người từ danh bạ</button></>}</div>}
+
           <div className="space-y-1.5">
             <label htmlFor="tx-note" className="block text-xs font-medium text-slate-600 dark:text-slate-400">
               Ghi chú (tuỳ chọn)

@@ -11,6 +11,11 @@ export interface Subtask {
   title: string;
   completed: boolean;
 }
+export interface LocalAttachment {
+  name: string;
+  mimeType: string;
+  dataUrl: string;
+}
 
 export interface Task {
   id: string;
@@ -28,7 +33,9 @@ export interface Task {
   subtasks: Subtask[];
   focusMinutesLogged: number;
   descriptionPhoto?: string; // Photo describing the task
+  attachment?: LocalAttachment;
   proofPhoto?: string; // Completion proof photo
+  proofAttachment?: LocalAttachment;
   createdAt: string;
 }
 

@@ -1,16 +1,18 @@
 import React from 'react';
-import { X } from 'lucide-react';
+import { Trash2, X } from 'lucide-react';
 
 interface ImageLightboxModalProps {
   src: string | null;
   caption?: string;
   onClose: () => void;
+  onRemove?: () => void;
 }
 
 export const ImageLightboxModal: React.FC<ImageLightboxModalProps> = ({
   src,
   caption,
   onClose,
+  onRemove,
 }) => {
   if (!src) return null;
 
@@ -30,6 +32,7 @@ export const ImageLightboxModal: React.FC<ImageLightboxModalProps> = ({
           <p className="text-sm font-medium text-slate-100 truncate">
             {caption || 'Ảnh đính kèm'}
           </p>
+          {onRemove && <button type="button" onClick={() => { if (window.confirm('Loại bỏ ảnh này?')) { onRemove(); onClose(); } }} className="min-h-[36px] px-3 rounded-lg text-xs font-semibold text-rose-300 hover:bg-rose-950/50 inline-flex items-center gap-1"><Trash2 className="w-3.5 h-3.5" />Xóa ảnh</button>}
           <button
             type="button"
             onClick={onClose}
